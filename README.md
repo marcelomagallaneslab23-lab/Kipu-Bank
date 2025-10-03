@@ -30,7 +30,7 @@
    - Ve al tab **"Deploy & Run Transactions"**.
    - Selecciona el entorno **"Injected Provider"** (conecta Metamask).
    - Establece los parámetros del constructor:
-     - `_withdrawalLimit`: Límite de retiro por transacción (ej: `0.1 ether`).
+     - `_retiroMaximo`: Límite de retiro por transacción (ej: `0.1 ether`).
      - `_bankCap`: Capacidad máxima del banco (ej: `100 ether`).
 
 3. **Despliega**:
