@@ -13,23 +13,30 @@ contract KipuBank {
             Definición de Variables de Estado
     ///////////////////////*/
 
-    /// @dev Límite máximo de retiro por transacción (inmutable)
+    /// @notice Límite máximo de retiro por transacción (inmutable)
+    /// @dev Se establece en el constructor y no puede cambiar
     uint256 public immutable i_retiroMaximo;
 
-    /// @dev Límite global de depósitos en el banco (inmutable)
+    /// @notice Límite global de depósitos en el banco (inmutable)
+    /// @dev Se establece en el constructor y no puede cambiar
     uint256 public immutable i_bankCap;
 
-    /// @dev Total de ETH depositado en el banco
+    /// @notice Total de ETH depositado en el contrato
+    /// @dev Se actualiza en cada depósito y retiro
     uint256 public s_totalDepositos;
 
-    /// @dev Registro de bóvedas personales por usuario (saldo en wei)
+    /// @notice Mapeo de saldos individuales por usuario
+    /// @dev Cada dirección tiene su propia bóveda de ETH
     mapping(address usuario => uint256 saldo) public s_bovedas;
 
-    /// @dev Contador de depósitos realizados
+    /// @notice Contador de depósitos realizados
     uint256 public s_numDepositos;
 
-    /// @dev Contador de retiros realizados
+    /// @notice Contador de retiros realizados
     uint256 public s_numRetiros;
+
+    /// @dev Flag para protección contra reentrancia
+    bool private locked;
 
     /*///////////////////////
             Eventos
@@ -49,20 +56,32 @@ contract KipuBank {
             Errores Personalizados
     ///////////////////////*/
 
-    /// @dev Error si el depósito excede el límite global del banco
+    /// @notice Se lanza si el depósito supera el límite total del banco
+    /// @param intento Monto que se intentó depositar
+    /// @param disponible Monto restante disponible en el banco
     error KipuBank_DepositoExcedeCap(uint256 intento, uint256 disponible);
 
-    /// @dev Error si el saldo es insuficiente para el retiro solicitado
+    /// @notice Se lanza si el usuario intenta retirar más de lo que tiene
+    /// @param solicitado Monto solicitado
+    /// @param disponible Saldo disponible en la bóveda
     error KipuBank_SaldoInsuficiente(uint256 solicitado, uint256 disponible);
 
-    /// @dev Error si el retiro excede el límite por transacción
+    /// @notice Se lanza si el retiro excede el límite permitido por transacción
+    /// @param solicitado Monto solicitado
+    /// @param limite Límite máximo permitido
     error KipuBank_RetiroExcedeLimite(uint256 solicitado, uint256 limite);
 
-    /// @dev Error si el depósito es cero o inválido
-    error KipuBank_DepositoInvalido();
+    /// @notice Se lanza si el depósito es igual a cero
+    error KipuBank_DepositoZero();
 
-    /// @dev Error si falla la transferencia de ETH
+    /// @notice Se lanza si la transferencia de ETH falla
     error KipuBank_TransferenciaFallida();
+
+    /// @notice Se lanza si los parámetros iniciales del contrato son inválidos
+    error KipuBank_ParametrosInvalidos();
+
+    /// @notice Se lanza si se detecta un intento de reentrancia
+    error KipuBank_ReentranciaDetectada();
 
     /*///////////////////////
             Constructor
@@ -74,8 +93,7 @@ contract KipuBank {
      * @param _bankCap Límite total de depósitos en el banco (en wei)
      */
     constructor(uint256 _retiroMaximo, uint256 _bankCap) {
-        // Validar que los límites sean mayores a cero
-        if (_retiroMaximo == 0 || _bankCap == 0) revert();
+        if (_retiroMaximo == 0 || _bankCap == 0) revert KipuBank_ParametrosInvalidos();
         i_retiroMaximo = _retiroMaximo;
         i_bankCap = _bankCap;
     }
@@ -85,6 +103,7 @@ contract KipuBank {
     ///////////////////////*/
 
     /// @dev Modificador para validar que el retiro no exceda el límite por transacción
+    /// @param _monto Monto solicitado para retirar
     modifier validarRetiro(uint256 _monto) {
         if (_monto > i_retiroMaximo) {
             revert KipuBank_RetiroExcedeLimite(_monto, i_retiroMaximo);
@@ -92,16 +111,24 @@ contract KipuBank {
         _;
     }
 
+    /// @dev Modificador para prevenir ataques de reentrancia
+    modifier nonReentrant() {
+        if (locked) revert KipuBank_ReentranciaDetectada();
+        locked = true;
+        _;
+    }
+
     /*///////////////////////
             Funciones Externas
     ///////////////////////*/
 
+    
     /**
-     * @dev Permite a un usuario depositar ETH en su bóveda personal
-     * @notice Reverte si el monto es cero o se excede el límite global (`i_bankCap`)
-     */
-    function depositar() external payable {
-        if (msg.value == 0) revert KipuBank_DepositoInvalido();
+    * @notice Permite a un usuario depositar ETH en su bóveda personal
+    * @dev Requiere que el monto sea mayor a cero y no exceda el límite global
+    */
+    function depositar() external payable nonReentrant {
+        if (msg.value == 0) revert KipuBank_DepositoZero();
 
         uint256 nuevoTotal = s_totalDepositos + msg.value;
         if (nuevoTotal > i_bankCap) {
@@ -117,14 +144,11 @@ contract KipuBank {
     }
 
     /**
-     * @dev Permite a un usuario retirar ETH de su bóveda personal
+     * @notice Permite a un usuario retirar ETH de su bóveda personal
+     * @dev Protegido contra reentrancia. Requiere saldo suficiente y que el monto no exceda el límite.
      * @param _monto Cantidad a retirar (en wei)
-     * @notice Reverte si:
-     * - El monto excede `i_retiroMaximo` (via modificador)
-     * - El saldo es insuficiente
-     * - Falla la transferencia de ETH
      */
-    function retirar(uint256 _monto) external validarRetiro(_monto) {
+    function retirar(uint256 _monto) external nonReentrant validarRetiro(_monto) {
         uint256 saldo = s_bovedas[msg.sender];
         if (_monto > saldo) revert KipuBank_SaldoInsuficiente(_monto, saldo);
 
@@ -139,10 +163,10 @@ contract KipuBank {
     }
 
     /**
-     * @dev Consulta el saldo de la bóveda del usuario
-     * @return saldo Cantidad en wei
+     * @notice Consulta el saldo de la bóveda del usuario
+     * @return saldo Cantidad en wei disponible en la bóveda del usuario
      */
-    function consultarSaldo() external view returns (uint256) {
+    function consultarSaldo() external view returns (uint256 saldo) {
         return s_bovedas[msg.sender];
     }
 
@@ -160,5 +184,10 @@ contract KipuBank {
         if (!exito) revert KipuBank_TransferenciaFallida();
     }
 }
+
+
+
+
+ABI:
 
 [{"inputs":[{"internalType":"uint256","name":"_retiroMaximo","type":"uint256"},{"internalType":"uint256","name":"_bankCap","type":"uint256"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[{"internalType":"uint256","name":"intento","type":"uint256"},{"internalType":"uint256","name":"disponible","type":"uint256"}],"name":"KipuBank_DepositoExcedeCap","type":"error"},{"inputs":[],"name":"KipuBank_DepositoInvalido","type":"error"},{"inputs":[{"internalType":"uint256","name":"solicitado","type":"uint256"},{"internalType":"uint256","name":"limite","type":"uint256"}],"name":"KipuBank_RetiroExcedeLimite","type":"error"},{"inputs":[{"internalType":"uint256","name":"solicitado","type":"uint256"},{"internalType":"uint256","name":"disponible","type":"uint256"}],"name":"KipuBank_SaldoInsuficiente","type":"error"},{"inputs":[],"name":"KipuBank_TransferenciaFallida","type":"error"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"usuario","type":"address"},{"indexed":false,"internalType":"uint256","name":"monto","type":"uint256"}],"name":"KipuBank_DepositoRealizado","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"usuario","type":"address"},{"indexed":false,"internalType":"uint256","name":"monto","type":"uint256"}],"name":"KipuBank_RetiroRealizado","type":"event"},{"inputs":[],"name":"consultarSaldo","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"depositar","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[],"name":"i_bankCap","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"i_retiroMaximo","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"_monto","type":"uint256"}],"name":"retirar","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"usuario","type":"address"}],"name":"s_bovedas","outputs":[{"internalType":"uint256","name":"saldo","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"s_numDepositos","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"s_numRetiros","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"s_totalDepositos","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
